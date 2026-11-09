@@ -1,0 +1,27 @@
+# Secrets and local settings (never commit these)
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Backend (Maven / Java)
+backend/**/target/
+*.class
+*.log
+
+# Frontend (Node / Vite)
+frontend/node_modules/
+frontend/dist/
+
+# IDE files
+.idea/
+*.iml
+.vscode/
+.classpath
+.project
+.settings/
+
+# Operating system files
+.DS_Store
+Thumbs.db
