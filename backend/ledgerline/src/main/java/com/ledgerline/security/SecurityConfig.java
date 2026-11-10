@@ -4,6 +4,7 @@ import jakarta.servlet.http.HttpServletResponse;
 import java.io.IOException;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.http.HttpMethod;
 import org.springframework.http.HttpStatus;
 import org.springframework.security.config.annotation.web.builders.HttpSecurity;
 import org.springframework.security.config.annotation.web.configuration.EnableWebSecurity;
@@ -43,6 +44,8 @@ public class SecurityConfig {
                 .requestMatchers("/api/auth/login", "/api/auth/csrf").permitAll()
                 .requestMatchers("/api/admin/**").hasRole("ADMIN")
                 .requestMatchers("/api/audit/**").hasAnyRole("ADMIN", "AUDITOR")
+                // NEW: only admins and account holders may create accounts. Auditors are read-only.
+                .requestMatchers(HttpMethod.POST, "/api/accounts").hasAnyRole("ADMIN", "ACCOUNT_HOLDER")
                 .anyRequest().authenticated())
 
             // Login with username and password. We answer with small JSON, never an HTML page.
