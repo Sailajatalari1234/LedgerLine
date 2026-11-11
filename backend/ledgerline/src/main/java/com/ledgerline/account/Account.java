@@ -2,6 +2,8 @@ package com.ledgerline.account;
 
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
+import jakarta.persistence.EnumType;
+import jakarta.persistence.Enumerated;
 import jakarta.persistence.GeneratedValue;
 import jakarta.persistence.GenerationType;
 import jakarta.persistence.Id;
@@ -17,14 +19,18 @@ public class Account {
     @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long id;
 
-    @Column(name = "owner_id", nullable = false)
+    // Empty only for SYSTEM accounts.
+    @Column(name = "owner_id")
     private Long ownerId;
 
     @Column(nullable = false, length = 100)
     private String name;
 
-    // Paise. There is deliberately no setter: balances will change only through
-    // controlled money operations in a later step.
+    @Enumerated(EnumType.STRING)
+    @Column(nullable = false, length = 10)
+    private AccountKind kind;
+
+    // Paise. It changes only through credit() and debit(), never through a setter.
     @Column(nullable = false)
     private long balance;
 
@@ -34,10 +40,33 @@ public class Account {
     protected Account() {
     }
 
+    /** A customer account. Balances always start at zero. */
     public Account(Long ownerId, String name) {
         this.ownerId = ownerId;
         this.name = name;
+        this.kind = AccountKind.CUSTOMER;
         this.balance = 0;
+    }
+
+    /** CREDIT: adds money. Math.addExact throws an error instead of silently overflowing. */
+    public void credit(long amount) {
+        requirePositive(amount);
+        this.balance = Math.addExact(this.balance, amount);
+    }
+
+    /** DEBIT: removes money. A customer account is never allowed to go below zero. */
+    public void debit(long amount) {
+        requirePositive(amount);
+        if (kind == AccountKind.CUSTOMER && balance < amount) {
+            throw new IllegalStateException("Insufficient funds");
+        }
+        this.balance = Math.subtractExact(this.balance, amount);
+    }
+
+    private static void requirePositive(long amount) {
+        if (amount <= 0) {
+            throw new IllegalArgumentException("Amount must be positive");
+        }
     }
 
     public Long getId() {
@@ -50,6 +79,10 @@ public class Account {
 
     public String getName() {
         return name;
+    }
+
+    public AccountKind getKind() {
+        return kind;
     }
 
     public long getBalance() {
