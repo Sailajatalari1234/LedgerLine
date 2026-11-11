@@ -41,7 +41,7 @@ public class SecurityConfig {
 
             // Who may call which URL. Rules are checked from top to bottom.
             .authorizeHttpRequests(auth -> auth
-                .requestMatchers("/api/auth/login", "/api/auth/csrf").permitAll()
+                .requestMatchers("/api/auth/login", "/api/auth/csrf", "/api/health").permitAll()
                 .requestMatchers("/api/admin/**").hasRole("ADMIN")
                 .requestMatchers("/api/audit/**").hasAnyRole("ADMIN", "AUDITOR")
                 // Only admins and account holders may create accounts. Auditors are read-only.
