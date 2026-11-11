@@ -1,6 +1,7 @@
 package com.ledgerline.ledger;
 
 import com.ledgerline.account.Account;
+import com.ledgerline.account.AccountKind;
 import com.ledgerline.account.AccountRepository;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
@@ -18,7 +19,7 @@ import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.server.ResponseStatusException;
 
 /**
- * Deposits and withdrawals. Each public method is ONE database transaction:
+ * Deposits, withdrawals and transfers. Each public method is ONE database transaction:
  * everything inside succeeds together or is undone together.
  */
 @Service
@@ -54,18 +55,75 @@ public class MoneyService {
         return execute(TransactionType.WITHDRAWAL, callerId, accountId, amount, description, idempotencyKey);
     }
 
+    /** Moves money between two customer accounts. The caller must own the source account. */
+    @Transactional
+    public MoneyOutcome transfer(Long callerId, long fromId, long toId, long amount,
+                                 String description, String idempotencyKey) {
+
+        if (fromId == toId) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Cannot transfer to the same account");
+        }
+
+        // 1. Ownership of the SOURCE account. Someone else's account answers 404.
+        if (!accountRepository.existsByIdAndOwnerId(fromId, callerId)) {
+            throw new ResponseStatusException(HttpStatus.NOT_FOUND);
+        }
+
+        // 2. Idempotency: reserve the key (the unique constraint decides the winner).
+        String requestHash = sha256("TRANSFER|" + fromId + "|" + toId + "|" + amount + "|" + nullToEmpty(description));
+        int reserved = jdbcTemplate.update(
+                "INSERT INTO idempotency_keys (user_id, idempotency_key, request_hash) VALUES (?, ?, ?) "
+                        + "ON CONFLICT (user_id, idempotency_key) DO NOTHING",
+                callerId, idempotencyKey, requestHash);
+        if (reserved == 0) {
+            return replay(callerId, idempotencyKey, requestHash, fromId);
+        }
+
+        // 3. Lock BOTH accounts in ascending id order. Everyone locks in the same order,
+        //    so two opposite transfers can never wait for each other forever (deadlock).
+        Map<Long, Account> locked = lockInOrder(fromId, toId);
+        Account from = locked.get(fromId);
+        Account to = locked.get(toId);
+
+        // The recipient must be a normal customer account, never the bank's own account.
+        if (to.getKind() != AccountKind.CUSTOMER) {
+            throw new ResponseStatusException(HttpStatus.NOT_FOUND);
+        }
+
+        // 4. Overdraft check (the database CHECK is a second safety net).
+        if (from.getBalance() < amount) {
+            throw new InsufficientFundsException();
+        }
+
+        // 5. Record the event, move the money, write both sides of the double entry.
+        LedgerTransaction tx = transactionRepository.save(
+                new LedgerTransaction(TransactionType.TRANSFER, amount, callerId, description));
+
+        from.debit(amount);
+        to.credit(amount);
+
+        entryRepository.save(new LedgerEntry(tx.getId(), from.getId(), Direction.DEBIT, amount, from.getBalance()));
+        entryRepository.save(new LedgerEntry(tx.getId(), to.getId(), Direction.CREDIT, amount, to.getBalance()));
+
+        jdbcTemplate.update(
+                "UPDATE idempotency_keys SET transaction_id = ? WHERE user_id = ? AND idempotency_key = ?",
+                tx.getId(), callerId, idempotencyKey);
+
+        return new MoneyOutcome(
+                new MoneyResponse(tx.getId(), TransactionType.TRANSFER.name(), fromId, amount, from.getBalance()),
+                false);
+    }
+
     private MoneyOutcome execute(TransactionType type, Long callerId, long accountId, long amount,
                                  String description, String idempotencyKey) {
 
         // 1. Ownership: only the owner may touch this account.
-        //    Someone else's account answers 404, the same as an account that does not exist.
         if (!accountRepository.existsByIdAndOwnerId(accountId, callerId)) {
             throw new ResponseStatusException(HttpStatus.NOT_FOUND);
         }
 
-        // 2. Idempotency: try to reserve the key. The unique constraint decides who wins,
-        //    even if two identical requests arrive at the same moment.
-        String requestHash = hashOf(type, accountId, amount, description);
+        // 2. Idempotency: try to reserve the key.
+        String requestHash = sha256(type.name() + "|" + accountId + "|" + amount + "|" + nullToEmpty(description));
         int reserved = jdbcTemplate.update(
                 "INSERT INTO idempotency_keys (user_id, idempotency_key, request_hash) VALUES (?, ?, ?) "
                         + "ON CONFLICT (user_id, idempotency_key) DO NOTHING",
@@ -82,7 +140,7 @@ public class MoneyService {
 
         boolean isDeposit = type == TransactionType.DEPOSIT;
 
-        // 4. Overdraft check (the database CHECK is a second safety net).
+        // 4. Overdraft check.
         if (!isDeposit && customer.getBalance() < amount) {
             throw new InsufficientFundsException();
         }
@@ -159,9 +217,12 @@ public class MoneyService {
         return new MoneyOutcome(original, true);
     }
 
+    private static String nullToEmpty(String value) {
+        return value == null ? "" : value;
+    }
+
     /** A fingerprint (SHA-256) of everything that matters in the request. */
-    private static String hashOf(TransactionType type, long accountId, long amount, String description) {
-        String text = type.name() + "|" + accountId + "|" + amount + "|" + (description == null ? "" : description);
+    private static String sha256(String text) {
         try {
             MessageDigest digest = MessageDigest.getInstance("SHA-256");
             return HexFormat.of().formatHex(digest.digest(text.getBytes(StandardCharsets.UTF_8)));
