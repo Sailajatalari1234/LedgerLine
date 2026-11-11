@@ -44,8 +44,11 @@ public class SecurityConfig {
                 .requestMatchers("/api/auth/login", "/api/auth/csrf").permitAll()
                 .requestMatchers("/api/admin/**").hasRole("ADMIN")
                 .requestMatchers("/api/audit/**").hasAnyRole("ADMIN", "AUDITOR")
-                // NEW: only admins and account holders may create accounts. Auditors are read-only.
+                // Only admins and account holders may create accounts. Auditors are read-only.
                 .requestMatchers(HttpMethod.POST, "/api/accounts").hasAnyRole("ADMIN", "ACCOUNT_HOLDER")
+                // Only the account holder may move money (ownership is checked again in the service).
+                .requestMatchers(HttpMethod.POST, "/api/accounts/*/deposits", "/api/accounts/*/withdrawals")
+                    .hasRole("ACCOUNT_HOLDER")
                 .anyRequest().authenticated())
 
             // Login with username and password. We answer with small JSON, never an HTML page.
