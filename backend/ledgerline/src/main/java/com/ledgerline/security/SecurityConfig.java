@@ -41,7 +41,9 @@ public class SecurityConfig {
 
             // Who may call which URL. Rules are checked from top to bottom.
             .authorizeHttpRequests(auth -> auth
-                .requestMatchers("/api/auth/login", "/api/auth/csrf", "/api/health").permitAll()
+                // Open: the login page itself, the CSRF cookie, the health check and the web page.
+                .requestMatchers("/api/auth/login", "/api/auth/csrf", "/api/health",
+                        "/", "/index.html", "/favicon.ico").permitAll()
                 .requestMatchers("/api/admin/**").hasRole("ADMIN")
                 .requestMatchers("/api/audit/**").hasAnyRole("ADMIN", "AUDITOR")
                 // Only admins and account holders may create accounts. Auditors are read-only.
@@ -69,7 +71,7 @@ public class SecurityConfig {
                 .invalidateHttpSession(true)
                 .deleteCookies("JSESSIONID"))
 
-            // Not logged in? Answer 401 (no redirect to a login page, because our frontend is React).
+            // Not logged in? Answer 401 (no redirect to a login page, because our frontend is a plain web page).
             .exceptionHandling(ex -> ex
                 .authenticationEntryPoint(new HttpStatusEntryPoint(HttpStatus.UNAUTHORIZED)));
 

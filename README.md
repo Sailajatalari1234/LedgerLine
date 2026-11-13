@@ -19,7 +19,7 @@ Built for the Snovasys RISE 2026 hiring challenge. The organizers later said the
 | Append-only audit log (database trigger) and audit filter | Done, tested |
 | Transaction history and statements | Done, tested |
 | Deployment (Render and Neon) | Deployed. Verified live on 12 Nov 2026: admin login and GET /api/auth/me work |
-| React dashboard | NOT done. The frontend folder contains only a Vite and Tailwind starter page |
+| Web page | A single-file page (backend/ledgerline/src/main/resources/static/index.html) served by the backend, with forms for login, accounts, deposit, withdraw, transfer, history, admin user creation and the audit log. It loads and shows the login form; the forms were only lightly tested. This is NOT a React dashboard. The React and Tailwind project in /frontend is only a starter page and is not used |
 | Redis rate limiting | NOT done |
 | Separate database roles (migration role vs limited runtime role) | NOT done. The app connects as the database owner |
 | Prisma | NOT used. This project uses Java, Spring Data JPA and Flyway instead |

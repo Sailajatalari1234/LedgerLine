@@ -1,0 +1,302 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LedgerLine</title>
+<style>
+:root{--navy:#0a1628;--card:#10213d;--line:rgba(255,255,255,.12);--em:#10b981;--em2:#34d399;--text:#e5edf8;--mute:#94a3b8;--bad:#f87171}
+*{box-sizing:border-box}
+body{margin:0;font:15px/1.5 system-ui,"Segoe UI",Arial,sans-serif;background:var(--navy);color:var(--text)}
+main{max-width:1100px;margin:0 auto;padding:16px}
+h1{margin:0;font-size:22px}
+h2{margin:0 0 12px;font-size:17px}
+.brand{color:var(--em2)}
+.bar{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:16px}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:16px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:18px;margin-bottom:16px}
+.narrow{max-width:380px;margin:40px auto}
+label{display:block;margin:8px 0;color:var(--mute);font-size:13px}
+input,select{display:block;width:100%;margin-top:4px;padding:9px 10px;border-radius:8px;border:1px solid var(--line);background:#0a1628;color:var(--text);font:inherit}
+.btn{margin-top:10px;margin-right:8px;padding:9px 16px;border:0;border-radius:8px;background:var(--em);color:#06231a;font-weight:600;cursor:pointer}
+.btn:hover{background:var(--em2)}
+.ghost{background:transparent;color:var(--text);border:1px solid var(--line)}
+.pill{background:#0a1628;border:1px solid var(--em);color:var(--em2);border-radius:99px;padding:1px 10px;font-size:12px}
+.msg{position:sticky;top:0;z-index:5;padding:10px 14px;border-radius:10px;margin-bottom:14px}
+.ok{background:#064e3b;border:1px solid var(--em)}
+.bad{background:#4c1d1d;border:1px solid var(--bad)}
+.scroll{overflow-x:auto}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th,td{text-align:left;padding:7px 8px;border-bottom:1px solid var(--line);white-space:nowrap}
+th{color:var(--mute);font-weight:600}
+.num{text-align:right}
+.hint{color:var(--mute);font-size:13px}
+</style>
+</head>
+<body>
+<main>
+  <div id="msg" class="msg" hidden></div>
+  <div id="app"></div>
+  <p class="hint">Demo with synthetic data only. All numbers on this page come from the server.</p>
+</main>
+<script>
+const app = document.getElementById('app');
+const msg = document.getElementById('msg');
+const keys = new Map();
+let me = null;
+let accounts = [];
+let selected = null;
+
+// Small helper that builds elements. It always uses text nodes, never innerHTML, so server data cannot inject HTML.
+function h(tag, props = {}, ...kids) {
+  const e = document.createElement(tag);
+  for (const [k, v] of Object.entries(props)) {
+    if (k === 'class') e.className = v;
+    else if (k.startsWith('on')) e.addEventListener(k.slice(2), v);
+    else e.setAttribute(k, v);
+  }
+  for (const kid of kids.flat()) {
+    if (kid === null || kid === undefined) continue;
+    e.append(kid instanceof Node ? kid : document.createTextNode(String(kid)));
+  }
+  return e;
+}
+const label = (text, input) => h('label', {}, text, input);
+const select = (options) => h('select', {}, options.map(([value, text]) => h('option', { value }, text)));
+
+function say(text, ok = true) {
+  msg.textContent = text || '';
+  msg.className = 'msg ' + (ok ? 'ok' : 'bad');
+  msg.hidden = !text;
+  if (text) window.scrollTo({ top: 0, behavior: 'smooth' });
+}
+
+const REASONS = {
+  400: 'Invalid input. Check the fields.',
+  401: 'Please log in again.',
+  403: 'Your role is not allowed to do that.',
+  404: 'Not found (or not yours).',
+  409: 'Conflict: it already exists, or an identical request is still running.',
+  422: 'Refused: insufficient funds, or this retry key was used with different data.',
+  503: 'Service unavailable.'
+};
+const explain = (r) => REASONS[r.status] || ('Error ' + r.status);
+
+// The server sends a CSRF token in a cookie. We copy it into a header on every write request.
+function csrfToken() {
+  const m = document.cookie.match(/(?:^|; )XSRF-TOKEN=([^;]*)/);
+  return m ? decodeURIComponent(m[1]) : '';
+}
+
+async function api(method, path, opts = {}) {
+  const headers = {};
+  if (method !== 'GET') headers['X-XSRF-TOKEN'] = csrfToken();
+  let body;
+  if (opts.json !== undefined) { headers['Content-Type'] = 'application/json'; body = JSON.stringify(opts.json); }
+  if (opts.form) body = new URLSearchParams(opts.form);
+  if (opts.key) headers['Idempotency-Key'] = opts.key;
+  const res = await fetch(path, { method, headers, body, credentials: 'same-origin' });
+  const text = await res.text();
+  let data = null;
+  if (text) { try { data = JSON.parse(text); } catch (e) { data = text; } }
+  return { ok: res.ok, status: res.status, data, replayed: res.headers.get('Idempotent-Replayed') === 'true' };
+}
+
+// Same request = same key (a retry). A changed request gets a new key.
+function keyFor(fingerprint) {
+  if (!keys.has(fingerprint)) keys.set(fingerprint, crypto.randomUUID());
+  return keys.get(fingerprint);
+}
+
+// Turns "250.50" rupees into 25050 paise without any floating point.
+function toPaise(text) {
+  const t = String(text).trim();
+  if (!/^\d+(\.\d{1,2})?$/.test(t)) return null;
+  const parts = t.split('.');
+  const paise = Number(parts[0]) * 100 + Number(((parts[1] || '') + '00').slice(0, 2));
+  return paise >= 1 && paise <= 1000000000 ? paise : null;
+}
+const rupees = (p) => 'Rs ' + (p / 100).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+const AMOUNT_HELP = 'Enter an amount in rupees with at most 2 decimals (Rs 0.01 to Rs 10,000,000).';
+
+async function boot() {
+  await api('GET', '/api/auth/csrf');
+  const r = await api('GET', '/api/auth/me');
+  if (r.ok) { me = r.data; await showApp(); } else { showLogin(); }
+}
+
+function showLogin() {
+  me = null; selected = null;
+  const user = h('input', { type: 'text', autocomplete: 'username', required: '' });
+  const pass = h('input', { type: 'password', autocomplete: 'current-password', required: '' });
+  const form = h('form', { class: 'card narrow', onsubmit: async (e) => {
+    e.preventDefault();
+    const r = await api('POST', '/api/auth/login', { form: { username: user.value.trim(), password: pass.value } });
+    if (!r.ok) { say(r.status === 401 ? 'Invalid username or password.' : 'Login failed (' + r.status + ').', false); return; }
+    say('');
+    const m = await api('GET', '/api/auth/me');
+    if (m.ok) { me = m.data; await showApp(); }
+  } },
+    h('h1', {}, h('span', { class: 'brand' }, 'Ledger'), 'Line'),
+    h('p', { class: 'hint' }, 'Secure money movement demo'),
+    label('Username', user), label('Password', pass),
+    h('button', { class: 'btn', type: 'submit' }, 'Log in'));
+  app.replaceChildren(form);
+}
+
+async function logout() {
+  await api('POST', '/api/auth/logout');
+  await api('GET', '/api/auth/csrf');
+  say('Logged out.');
+  showLogin();
+}
+
+async function showApp() {
+  const r = await api('GET', '/api/accounts');
+  accounts = r.ok ? r.data : [];
+  render();
+  if (selected) loadHistory(selected);
+  if (me.role === 'ADMIN' || me.role === 'AUDITOR') loadAudit();
+}
+
+function render() {
+  const isHolder = me.role === 'ACCOUNT_HOLDER';
+  const isAdmin = me.role === 'ADMIN';
+  const staff = isAdmin || me.role === 'AUDITOR';
+
+  const bar = h('div', { class: 'bar' },
+    h('h1', {}, h('span', { class: 'brand' }, 'Ledger'), 'Line'),
+    h('div', {}, h('strong', {}, me.fullName + ' '), h('span', { class: 'pill' }, me.role), ' ',
+      h('button', { class: 'btn ghost', onclick: logout }, 'Log out')));
+
+  const rows = accounts.map((a) => h('tr', {},
+    h('td', {}, a.id), h('td', {}, a.name), staff ? h('td', {}, a.ownerId === null ? 'bank' : a.ownerId) : null,
+    h('td', { class: 'num' }, rupees(a.balancePaise)),
+    h('td', {}, h('button', { class: 'btn ghost', onclick: () => { selected = a.id; loadHistory(a.id); } }, 'History'))));
+  const accountsCard = h('div', { class: 'card' }, h('h2', {}, 'Accounts'),
+    accounts.length === 0 ? h('p', { class: 'hint' }, 'No accounts yet.') :
+      h('div', { class: 'scroll' }, h('table', {},
+        h('tr', {}, h('th', {}, 'ID'), h('th', {}, 'Name'), staff ? h('th', {}, 'Owner') : null, h('th', { class: 'num' }, 'Balance'), h('th', {}, '')),
+        rows)));
+
+  const cards = [accountsCard];
+  if (isHolder) cards.push(openAccountForm(), moneyForm(), transferForm());
+  if (isAdmin) cards.push(adminCreateUserForm(), adminCreateAccountForm());
+  cards.push(h('div', { class: 'card' }, h('h2', {}, 'Transaction history'), h('div', { id: 'history', class: 'scroll hint' }, 'Select "History" on an account.')));
+  if (staff) cards.push(h('div', { class: 'card' }, h('h2', {}, 'Audit log'), h('div', { id: 'audit', class: 'scroll hint' }, 'Loading...')));
+
+  app.replaceChildren(bar, h('div', { class: 'grid' }, cards));
+}
+
+function openAccountForm() {
+  const name = h('input', { type: 'text', maxlength: '100', required: '' });
+  return h('form', { class: 'card', onsubmit: async (e) => {
+    e.preventDefault();
+    const r = await api('POST', '/api/accounts', { json: { name: name.value.trim() } });
+    if (r.ok) { say('Account opened.'); await showApp(); } else say(explain(r), false);
+  } }, h('h2', {}, 'Open an account'), label('Account name', name), h('button', { class: 'btn', type: 'submit' }, 'Open account'));
+}
+
+function moneyForm() {
+  if (accounts.length === 0) return h('div', { class: 'card' }, h('h2', {}, 'Deposit / withdraw'), h('p', { class: 'hint' }, 'Open an account first.'));
+  const acct = select(accounts.map((a) => [a.id, '#' + a.id + ' ' + a.name + ' (' + rupees(a.balancePaise) + ')']));
+  const amt = h('input', { type: 'text', inputmode: 'decimal', placeholder: 'e.g. 250.50' });
+  const desc = h('input', { type: 'text', maxlength: '255', placeholder: 'optional' });
+  const run = async (kind) => {
+    const paise = toPaise(amt.value);
+    if (paise === null) { say(AMOUNT_HELP, false); return; }
+    const description = desc.value.trim() || null;
+    const fp = [kind, acct.value, paise, description].join('|');
+    const r = await api('POST', '/api/accounts/' + acct.value + '/' + kind, { json: { amountPaise: paise, description }, key: keyFor(fp) });
+    if (r.ok) {
+      keys.delete(fp);
+      say((kind === 'deposits' ? 'Deposit' : 'Withdrawal') + ' done. New balance ' + rupees(r.data.balancePaise) + (r.replayed ? ' (this was a replay of an earlier identical request)' : '') + '.');
+      selected = Number(acct.value);
+      await showApp();
+    } else say(explain(r), false);
+  };
+  return h('div', { class: 'card' }, h('h2', {}, 'Deposit / withdraw'),
+    label('Account', acct), label('Amount (rupees)', amt), label('Description', desc),
+    h('button', { class: 'btn', type: 'button', onclick: () => run('deposits') }, 'Deposit'),
+    h('button', { class: 'btn ghost', type: 'button', onclick: () => run('withdrawals') }, 'Withdraw'));
+}
+
+function transferForm() {
+  if (accounts.length === 0) return h('div', { class: 'card' }, h('h2', {}, 'Transfer'), h('p', { class: 'hint' }, 'Open an account first.'));
+  const from = select(accounts.map((a) => [a.id, '#' + a.id + ' ' + a.name + ' (' + rupees(a.balancePaise) + ')']));
+  const to = h('input', { type: 'number', min: '1', placeholder: 'Recipient account number', required: '' });
+  const amt = h('input', { type: 'text', inputmode: 'decimal', placeholder: 'e.g. 100.00' });
+  const desc = h('input', { type: 'text', maxlength: '255', placeholder: 'optional' });
+  return h('form', { class: 'card', onsubmit: async (e) => {
+    e.preventDefault();
+    const paise = toPaise(amt.value);
+    if (paise === null) { say(AMOUNT_HELP, false); return; }
+    const description = desc.value.trim() || null;
+    const body = { fromAccountId: Number(from.value), toAccountId: Number(to.value), amountPaise: paise, description };
+    const fp = ['transfer', body.fromAccountId, body.toAccountId, paise, description].join('|');
+    const r = await api('POST', '/api/transfers', { json: body, key: keyFor(fp) });
+    if (r.ok) {
+      keys.delete(fp);
+      say('Transfer done. Your new balance ' + rupees(r.data.balancePaise) + (r.replayed ? ' (replay of an earlier identical request)' : '') + '.');
+      selected = body.fromAccountId;
+      await showApp();
+    } else say(explain(r), false);
+  } }, h('h2', {}, 'Transfer'), label('From (your account)', from), label('To (account number)', to),
+    label('Amount (rupees)', amt), label('Description', desc), h('button', { class: 'btn', type: 'submit' }, 'Send money'));
+}
+
+function adminCreateUserForm() {
+  const username = h('input', { type: 'text', pattern: '[a-z0-9._-]{3,50}', placeholder: 'lowercase, 3-50 chars', required: '' });
+  const fullName = h('input', { type: 'text', maxlength: '100', required: '' });
+  const password = h('input', { type: 'password', minlength: '12', maxlength: '72', autocomplete: 'new-password', required: '' });
+  const role = select([['ACCOUNT_HOLDER', 'ACCOUNT_HOLDER'], ['AUDITOR', 'AUDITOR'], ['ADMIN', 'ADMIN']]);
+  return h('form', { class: 'card', onsubmit: async (e) => {
+    e.preventDefault();
+    const r = await api('POST', '/api/admin/users', { json: { username: username.value.trim(), password: password.value, fullName: fullName.value.trim(), role: role.value } });
+    if (r.ok) { say('User created: ' + r.data.username + ' (id ' + r.data.id + ').'); username.value = ''; fullName.value = ''; password.value = ''; }
+    else say(explain(r), false);
+  } }, h('h2', {}, 'Create a user'), label('Username', username), label('Full name', fullName),
+    label('Password (12 to 72 characters)', password), label('Role', role), h('button', { class: 'btn', type: 'submit' }, 'Create user'));
+}
+
+function adminCreateAccountForm() {
+  const owner = h('input', { type: 'number', min: '1', placeholder: 'User id of an ACCOUNT_HOLDER', required: '' });
+  const name = h('input', { type: 'text', maxlength: '100', required: '' });
+  return h('form', { class: 'card', onsubmit: async (e) => {
+    e.preventDefault();
+    const r = await api('POST', '/api/accounts', { json: { name: name.value.trim(), ownerId: Number(owner.value) } });
+    if (r.ok) { say('Account #' + r.data.id + ' created for user ' + r.data.ownerId + '.'); await showApp(); } else say(explain(r), false);
+  } }, h('h2', {}, 'Create an account for a holder'), label('Owner user id', owner), label('Account name', name),
+    h('button', { class: 'btn', type: 'submit' }, 'Create account'));
+}
+
+async function loadHistory(id) {
+  const box = document.getElementById('history');
+  if (!box) return;
+  const r = await api('GET', '/api/accounts/' + id + '/transactions?limit=20');
+  if (!r.ok) { box.textContent = explain(r); return; }
+  if (r.data.length === 0) { box.textContent = 'Account #' + id + ' has no transactions yet.'; return; }
+  box.className = 'scroll';
+  box.replaceChildren(h('p', { class: 'hint' }, 'Account #' + id + ' (newest first)'), h('table', {},
+    h('tr', {}, ['Entry', 'Txn', 'Type', 'Side', 'Amount', 'Balance after', 'Note', 'When'].map((t) => h('th', {}, t))),
+    r.data.map((x) => h('tr', {}, h('td', {}, x.entryId), h('td', {}, x.transactionId), h('td', {}, x.type), h('td', {}, x.direction),
+      h('td', { class: 'num' }, rupees(x.amountPaise)), h('td', { class: 'num' }, rupees(x.balanceAfterPaise)),
+      h('td', {}, x.description || ''), h('td', {}, new Date(x.createdAt).toLocaleString())))));
+}
+
+async function loadAudit() {
+  const box = document.getElementById('audit');
+  if (!box) return;
+  const r = await api('GET', '/api/audit/logs?limit=30');
+  if (!r.ok) { box.textContent = explain(r); return; }
+  box.className = 'scroll';
+  box.replaceChildren(h('table', {},
+    h('tr', {}, ['Time', 'Actor', 'Action', 'Status', 'HTTP', 'IP'].map((t) => h('th', {}, t))),
+    r.data.map((x) => h('tr', {}, h('td', {}, new Date(x.createdAt).toLocaleString()), h('td', {}, x.actor), h('td', {}, x.action),
+      h('td', {}, x.status), h('td', {}, x.httpStatus), h('td', {}, x.ipAddress || '')))));
+}
+
+boot();
+</script>
+</body>
+</html>
